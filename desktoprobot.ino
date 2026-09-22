@@ -1,16 +1,13 @@
 /*
  * ESP32-S3 Desktop Robot Alarm Clock
  *
- * Normal mode shows the time.  At boot the robot shows animated eyes.
+ * Normal mode shows the time. At boot the robot shows animated eyes.
  * GPIO 7 is a capacitive touch input:
  *   - first tap: blink + alien sound
  *   - second tap: smiling eyes + second sound
  *   - long touch: love eyes + love sound
  * GPIO 1 enters/advances alarm setup, GPIO 2 increments, GPIO 3 decrements
  * (or stops the alarm while it is sounding).
- *
- * Set WIFI_SSID/WIFI_PASSWORD before flashing.  Do not commit real Wi-Fi
- * credentials to a public repository.
  */
 
 #include <Arduino.h>
@@ -22,7 +19,6 @@
 #include <Adafruit_SSD1306.h>
 #include "driver/i2s_std.h"
 
-// ----------------------------- Hardware -----------------------------
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_SDA 8
@@ -46,7 +42,6 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 i2s_chan_handle_t tx_handle = nullptr;
 bool i2sEnabled = false;
 
-// ----------------------------- Alarm -----------------------------
 int alarmHour = 7, alarmMinute = 0;
 bool alarmSet = false;
 volatile bool alarmPlaying = false;
@@ -54,22 +49,15 @@ bool alarmTriggered = false;
 
 enum SettingMode { NORMAL_MODE, SET_HOUR, SET_MINUTE };
 SettingMode settingMode = NORMAL_MODE;
-
 bool lastSetState = HIGH, lastUpState = HIGH, lastStopState = HIGH;
 unsigned long lastButtonTime = 0;
 
-// ----------------------------- Touch / face state -----------------------------
 uint16_t touchThreshold = 0;
 bool touchWasDown = false;
 unsigned long touchStartedAt = 0;
 unsigned long lastTapAt = 0;
 byte tapCount = 0;
 
-void showClock();
-void stopAudio();
-void drawFace(const char *mood, bool blink = false);
-
-// ----------------------------- Audio -----------------------------
 #define NOTE_C4 262
 #define NOTE_D4 294
 #define NOTE_E4 330
@@ -105,8 +93,6 @@ bool initializeI2S() {
     }
   };
   if (i2s_channel_init_std_mode(tx_handle, &cfg) != ESP_OK) return false;
-  // Keep DMA disabled while idle. This prevents the MAX98357A from replaying
-  // stale samples after STOP or between sound effects.
   i2s_channel_enable(tx_handle);
   i2s_channel_disable(tx_handle);
   i2sEnabled = false;
@@ -114,8 +100,7 @@ bool initializeI2S() {
 }
 
 void startAudio() {
-  if (tx_handle && !i2sEnabled && i2s_channel_enable(tx_handle) == ESP_OK)
-    i2sEnabled = true;
+  if (tx_handle && !i2sEnabled && i2s_channel_enable(tx_handle) == ESP_OK) i2sEnabled = true;
 }
 
 void stopAudio() {
@@ -166,8 +151,7 @@ bool playMelodyOnce() {
   return alarmPlaying;
 }
 
-// ----------------------------- OLED faces -----------------------------
-void drawFace(const char *mood, bool blink) {
+void drawFace(const char *mood, bool blink = false) {
   display.clearDisplay();
   int leftX = 38, rightX = 90, y = 30;
   if (blink) {
@@ -178,7 +162,13 @@ void drawFace(const char *mood, bool blink) {
     display.fillCircle(rightX, y - 2, 12, SSD1306_WHITE);
     display.fillCircle(leftX, y - 6, 5, SSD1306_BLACK);
     display.fillCircle(rightX, y - 6, 5, SSD1306_BLACK);
-    display.drawArc(64, 42, 12, 7, 20, 160, SSD1306_WHITE);
+
+    // Adafruit_GFX does not provide drawArc(). Draw a small pixel-art
+    // smile instead, using only APIs available in all library versions.
+    display.drawLine(54, 40, 58, 44, SSD1306_WHITE);
+    display.drawLine(58, 44, 64, 46, SSD1306_WHITE);
+    display.drawLine(64, 46, 70, 44, SSD1306_WHITE);
+    display.drawLine(70, 44, 74, 40, SSD1306_WHITE);
   } else if (!strcmp(mood, "love")) {
     display.fillTriangle(leftX - 11, y - 4, leftX, y + 10, leftX + 11, y - 4, SSD1306_WHITE);
     display.fillCircle(leftX - 6, y - 5, 6, SSD1306_WHITE);
@@ -195,14 +185,6 @@ void drawFace(const char *mood, bool blink) {
   display.display();
 }
 
-void faceForTouch(const char *mood, bool blink, int a, int b, int c) {
-  drawFace(mood, blink);
-  playEffect(a, b, c);
-  delay(180);
-  showClock();
-}
-
-// ----------------------------- Display and controls -----------------------------
 void showClock() {
   struct tm t;
   if (!getLocalTime(&t)) {
@@ -215,6 +197,13 @@ void showClock() {
   display.setCursor((SCREEN_WIDTH - w) / 2, (SCREEN_HEIGHT - h) / 2); display.println(text); display.display();
 }
 
+void faceForTouch(const char *mood, bool blink, int a, int b, int c) {
+  drawFace(mood, blink);
+  playEffect(a, b, c);
+  delay(180);
+  showClock();
+}
+
 void showSettingScreen() {
   display.clearDisplay(); display.setTextColor(SSD1306_WHITE); display.setTextSize(1);
   display.setCursor(35, 2); display.println("SET ALARM");
@@ -225,8 +214,11 @@ void showSettingScreen() {
 }
 
 bool pressed(int pin, bool &last, unsigned long debounce = 160) {
-  bool now = digitalRead(pin); bool hit = now == LOW && last == HIGH && millis() - lastButtonTime > debounce;
-  if (hit) lastButtonTime = millis(); last = now; return hit;
+  bool now = digitalRead(pin);
+  bool hit = now == LOW && last == HIGH && millis() - lastButtonTime > debounce;
+  if (hit) lastButtonTime = millis();
+  last = now;
+  return hit;
 }
 
 void checkButtons() {
@@ -262,8 +254,8 @@ void checkTouch() {
     touchStartedAt = millis();
     if (lastTapAt && millis() - lastTapAt < 1500) tapCount = 2; else tapCount = 1;
     lastTapAt = millis();
-    if (tapCount == 1) faceForTouch("normal", true, 880, 1175, 1568); // alien
-    else faceForTouch("smile", false, 523, 659, 784);                 // smile
+    if (tapCount == 1) faceForTouch("normal", true, 880, 1175, 1568);
+    else faceForTouch("smile", false, 523, 659, 784);
   }
   if (down && millis() - touchStartedAt > 900 && tapCount != 3) {
     tapCount = 3; lastTapAt = 0; faceForTouch("love", false, 659, 784, 988);
@@ -273,7 +265,6 @@ void checkTouch() {
   if (tapCount == 2 && millis() - lastTapAt > 1600) tapCount = 0;
 }
 
-// ----------------------------- Alarm and Wi-Fi -----------------------------
 void checkAlarm() {
   if (!alarmSet || alarmPlaying) return;
   struct tm t; if (!getLocalTime(&t)) return;
